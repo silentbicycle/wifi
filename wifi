@@ -1,0 +1,176 @@
+-- Copyright (c) 2010 Scott Vokes <vokes.s@gmail.com>
+--
+-- Permission to use, copy, modify, and/or distribute this software for any
+-- purpose with or without fee is hereby granted, provided that the above
+-- copyright notice and this permission notice appear in all copies.
+-- 
+-- THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+-- WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+-- MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+-- ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+-- WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+-- ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+-- OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+#!/usr/bin/env lua
+
+networks = {}
+debug = false
+
+local fmt = string.format
+
+
+function print_usage()
+   print [[
+Usage: wifi [--debug] [name of network]
+       wifi --list    to list all known.
+       wifi --clear   to clear all settings.
+       wifi --scan    to scan for local networks.
+]]
+end
+
+
+function read_conf()
+   local home = os.getenv("HOME")
+   sudo = sudo or false
+
+   local fname = string.format("%s/.wifidat", home)
+   dofile(fname)                -- just run it
+   assert(device, "Must define wireless device.")
+end
+
+
+function Network(t)
+   local n = {}
+   n.key = assert(t.key)
+   n.nwid = t.nwid              -- if nil, ignored or via dhcp
+
+   -- when these are both nil, don't use crypto
+   n.wep = t.wep
+   n.wpa = t.wpa
+   assert(not(n.wep and n.wpa), "Only one kind of encryption")
+   
+   n.ip = t.ip or "DHCP"
+   
+   networks[t.key] = n
+end
+
+
+function list_known()
+   align = "%-16s %-30s %-16s %s" 
+   print(align:format("Network", "ID", "IP", "Key"))
+
+   for k, v in pairs(networks) do
+      print(align:format(v.key, v.nwid or "", v.ip or "",
+                         v.wep or v.wpa or ""))
+   end
+end
+
+
+function run_cmd(cmd)
+   if debug then
+      print(cmd)
+   else
+      os.execute(cmd)
+   end
+end
+
+
+function clear_settings()
+   local cmd = fmt("%s%s %s %s",
+                   sudo and "sudo " or "",
+                   "ifconfig ", device,
+                   " -nwid -wpa -wpapsk -chan")
+   run_cmd(cmd)
+end
+
+
+function scan()
+   local cmd = fmt("%s%s %s %s",
+                   sudo and "sudo " or "",
+                   "ifconfig ", device,
+                   "scan")
+   run_cmd(cmd)
+end
+
+
+
+function try_connect(key)
+   assert(networks[key], "Network " .. 
+          (key or "*bad key*") .. " not known.")
+   local n = networks[key]      -- network info
+   local com = {}               -- command line
+   if sudo then com[#com + 1] = "sudo " end
+   com[#com + 1] = "ifconfig " .. device .. " "
+   
+   if n.ip ~= "DHCP" then
+      com[#com + 1] = "inet " .. n.ip .. " " 
+   end
+
+   if n.nwid then
+      com[#com + 1] = 'nwid "' .. n.nwid .. '" '
+   else
+      com[#com + 1] = "-nwid "
+   end
+
+   com[#com + 1] = crypto_cmd(n)
+
+   com[#com + 1] = "-bssid -chan"
+
+   -- print(table.concat(com))
+   local cmd = table.concat(com)
+   if debug then
+      print(cmd)
+   else
+      os.execute(cmd)
+   end
+
+   if n.ip == "DHCP" then
+      com = {}
+      if sudo then com[#com + 1] = "sudo " end
+      com[#com + 1] = "dhclient " .. device
+      cmd = table.concat(com)
+      if debug then 
+         print(cmd)
+      else 
+         os.execute(cmd)
+      end
+   end
+end
+
+
+function crypto_cmd(nw)
+   assert(nw)
+   if nw.wep then return 'nwkey "' .. nw.wep .. '" -wpa '
+   elseif nw.wpa then 
+      local hexkey = get_wpa_psk(nw.nwid, nw.wpa)
+      return 'wpa wpapsk "' .. hexkey .. '" -nwkey '
+   else 
+      return "-wpa -nwkey -wpapsk "
+   end
+end
+
+
+function get_wpa_psk(nwid, textkey) -- generate WPA hex key
+   local proc = io.popen(('wpa-psk "%s" "%s"'):format(nwid, textkey))
+   return proc:read()
+end
+
+
+function main()
+   read_conf()
+
+   if arg[1] == "--debug" then 
+      debug = true
+      table.remove(arg, 1)
+   end      
+
+   if not arg[1] or arg[1] == "--help" then print_usage()
+   elseif arg[1] == "--list" or arg[1] == "-l" then list_known()
+   elseif arg[1] == "--clear" then clear_settings()
+   elseif arg[1] == "--scan" then scan()
+   else try_connect(arg[1]) 
+   end
+end
+   
+main()
